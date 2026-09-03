@@ -8,6 +8,7 @@ type DecodedMtc = { hours: number; minutes: number; seconds: number; frames: num
 
 const FRAME_RATES = [24, 25, 29.97, 30] as const;
 const ACCEPTED_VIDEO_TYPES = 'video/*,.mp4,.mov,.m4v,.webm';
+const VIDEO_SYNC_INTERVAL_MS = 1000;
 
 function formatTimecode(value: DecodedMtc | null) {
   if (!value) return '00:00:00:00';
@@ -36,6 +37,7 @@ export default function Home() {
   const receivedPartsRef = useRef(0);
   const previousPartRef = useRef<number | null>(null);
   const lastPacketAtRef = useRef(0);
+  const lastVideoSyncAtRef = useRef<number | null>(null);
   const syncEnabledRef = useRef(false);
   const offsetRef = useRef(0);
 
@@ -58,11 +60,17 @@ export default function Home() {
     midiInputRef.current = null;
     receivedPartsRef.current = 0;
     previousPartRef.current = null;
+    lastVideoSyncAtRef.current = null;
   }, []);
 
-  const syncVideo = useCallback((decoded: DecodedMtc) => {
+  const syncVideo = useCallback((decoded: DecodedMtc, force = false) => {
     const video = videoRef.current;
     if (!video || !syncEnabledRef.current || video.readyState < 1) return;
+    const now = performance.now();
+    const lastSyncAt = lastVideoSyncAtRef.current;
+    if (!force && lastSyncAt !== null && now - lastSyncAt < VIDEO_SYNC_INTERVAL_MS) return;
+    lastVideoSyncAtRef.current = now;
+
     const quarterFrameCompensation = decoded.direction === 'forward' ? 2 / decoded.fps : 0;
     const target = clamp(mtcToSeconds(decoded) + quarterFrameCompensation + offsetRef.current / 1000, 0, video.duration || Infinity);
     const drift = target - video.currentTime;
@@ -156,6 +164,7 @@ export default function Home() {
       if (midiStatus === 'live') {
         setMidiStatus('waiting');
         setStatusMessage('MTC信号を待っています');
+        lastVideoSyncAtRef.current = null;
         const video = videoRef.current;
         if (syncEnabledRef.current && video) { video.pause(); video.playbackRate = 1; }
       }
@@ -175,6 +184,7 @@ export default function Home() {
     setFileSize(`${(file.size / 1024 / 1024).toFixed(1)} MB`);
     setSyncEnabled(false);
     syncEnabledRef.current = false;
+    lastVideoSyncAtRef.current = null;
   }
 
   function handleDrop(event: DragEvent<HTMLDivElement>) {
@@ -187,17 +197,18 @@ export default function Home() {
     const next = !syncEnabled;
     setSyncEnabled(next);
     syncEnabledRef.current = next;
+    lastVideoSyncAtRef.current = null;
     const video = videoRef.current;
     if (!video) return;
     if (!next) { video.pause(); video.playbackRate = 1; }
-    else if (timecode) syncVideo(timecode);
+    else if (timecode) syncVideo(timecode, true);
   }
 
   function updateOffset(next: number) {
     const safe = clamp(Number.isFinite(next) ? next : 0, -99999, 99999);
     setOffset(safe);
     offsetRef.current = safe;
-    if (timecode && syncEnabledRef.current) syncVideo(timecode);
+    if (timecode && syncEnabledRef.current) syncVideo(timecode, true);
   }
 
   const progress = duration ? (currentTime / duration) * 100 : 0;
