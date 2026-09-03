@@ -8,7 +8,7 @@ type DecodedMtc = { hours: number; minutes: number; seconds: number; frames: num
 
 const FRAME_RATES = [24, 25, 29.97, 30] as const;
 const ACCEPTED_VIDEO_TYPES = 'video/*,.mp4,.mov,.m4v,.webm';
-const VIDEO_SYNC_INTERVAL_MS = 1000;
+const VIDEO_SYNC_INTERVAL_MS = 500;
 
 function formatTimecode(value: DecodedMtc | null) {
   if (!value) return '00:00:00:00';
