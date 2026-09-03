@@ -72,7 +72,21 @@ export default function Home() {
     lastVideoSyncAtRef.current = now;
 
     const quarterFrameCompensation = decoded.direction === 'forward' ? 2 / decoded.fps : 0;
-    const target = clamp(mtcToSeconds(decoded) + quarterFrameCompensation + offsetRef.current / 1000, 0, video.duration || Infinity);
+    const correctedTime = mtcToSeconds(decoded) + quarterFrameCompensation + offsetRef.current / 1000;
+    if (correctedTime < 0) {
+      video.pause();
+      video.playbackRate = 1;
+      video.currentTime = 0;
+      return;
+    }
+    if (Number.isFinite(video.duration) && correctedTime > video.duration) {
+      video.pause();
+      video.playbackRate = 1;
+      video.currentTime = video.duration;
+      return;
+    }
+
+    const target = clamp(correctedTime, 0, video.duration || Infinity);
     const drift = target - video.currentTime;
     if (decoded.direction === 'reverse') {
       video.pause();
