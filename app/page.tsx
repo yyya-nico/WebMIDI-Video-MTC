@@ -264,8 +264,8 @@ export default function Home() {
     setVideoUrl(url);
     setFileName(file.name);
     setFileSize(`${(file.size / 1024 / 1024).toFixed(1)} MB`);
-    setSyncEnabled(false);
-    syncEnabledRef.current = false;
+    setSyncEnabled(true);
+    syncEnabledRef.current = true;
     lastVideoSyncAtRef.current = null;
   }
 
@@ -316,7 +316,7 @@ export default function Home() {
         <section className="player-column" aria-label="ビデオプレーヤー">
           <div className={`video-stage ${dragging ? 'is-dragging' : ''} ${videoUrl ? 'has-video' : ''}`} onDragEnter={(event) => { event.preventDefault(); setDragging(true); }} onDragOver={(event) => event.preventDefault()} onDragLeave={() => setDragging(false)} onDrop={handleDrop}>
             {videoUrl ? (
-              <video ref={videoRef} src={videoUrl} playsInline muted={muted} onLoadedMetadata={(event) => { setDuration(event.currentTarget.duration); setCurrentTime(0); event.currentTarget.playbackRate = 1; }} onTimeUpdate={(event) => setCurrentTime(event.currentTarget.currentTime)} onClick={(event) => { if (!syncEnabled) { if (event.currentTarget.paused) void event.currentTarget.play(); else event.currentTarget.pause(); } }} />
+              <video ref={videoRef} src={videoUrl} playsInline muted={muted} onLoadedMetadata={(event) => { setDuration(event.currentTarget.duration); setCurrentTime(0); event.currentTarget.playbackRate = transportRateRef.current || 1; if (timecode) syncVideo(timecode, true); }} onTimeUpdate={(event) => setCurrentTime(event.currentTarget.currentTime)} onClick={(event) => { if (!syncEnabled) { if (event.currentTarget.paused) void event.currentTarget.play(); else event.currentTarget.pause(); } }} />
             ) : (
               <div className="empty-state">
                 <div className="upload-icon" aria-hidden="true"><span>＋</span></div>
