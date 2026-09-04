@@ -7,8 +7,11 @@ type MidiAccessLike = { inputs: Map<string, MidiInputLike>; onstatechange: (() =
 type DecodedMtc = { hours: number; minutes: number; seconds: number; frames: number; fps: number; dropFrame: boolean; direction: 'forward' | 'reverse' };
 
 const FRAME_RATES = [24, 25, 29.97, 30] as const;
+const PLAYBACK_RATES = [0.5, 0.75, 1, 1.25, 1.5, 2] as const;
 const ACCEPTED_VIDEO_TYPES = 'video/*,.mp4,.mov,.m4v,.webm';
 const VIDEO_SYNC_INTERVAL_MS = 500;
+const MAX_AUTO_PLAYBACK_RATE = 4;
+const RATE_SAMPLE_WINDOW = 5;
 
 function formatTimecode(value: DecodedMtc | null) {
   if (!value) return '00:00:00:00';
@@ -22,7 +25,12 @@ function formatDuration(seconds: number) {
 }
 
 function mtcToSeconds(value: DecodedMtc) {
-  return value.hours * 3600 + value.minutes * 60 + value.seconds + value.frames / value.fps;
+  const wholeSeconds = value.hours * 3600 + value.minutes * 60 + value.seconds;
+  if (!value.dropFrame) return wholeSeconds + value.frames / value.fps;
+  const totalMinutes = value.hours * 60 + value.minutes;
+  const droppedFrames = 2 * (totalMinutes - Math.floor(totalMinutes / 10));
+  const frameNumber = wholeSeconds * 30 + value.frames - droppedFrames;
+  return frameNumber / value.fps;
 }
 
 function clamp(value: number, min: number, max: number) { return Math.min(max, Math.max(min, value)); }
@@ -40,6 +48,10 @@ export default function Home() {
   const lastVideoSyncAtRef = useRef<number | null>(null);
   const syncEnabledRef = useRef(false);
   const offsetRef = useRef(0);
+  const playbackRateRef = useRef(1);
+  const transportRateRef = useRef(1);
+  const previousMtcSampleRef = useRef<{ seconds: number; receivedAt: number; direction: DecodedMtc['direction']; fps: number } | null>(null);
+  const rateSamplesRef = useRef<number[]>([]);
 
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [fileName, setFileName] = useState('');
@@ -54,6 +66,9 @@ export default function Home() {
   const [timecode, setTimecode] = useState<DecodedMtc | null>(null);
   const [offset, setOffset] = useState(0);
   const [syncEnabled, setSyncEnabled] = useState(false);
+  const [muted, setMuted] = useState(false);
+  const [playbackRate, setPlaybackRate] = useState(1);
+  const [transportRate, setTransportRate] = useState(1);
 
   const disconnectMidi = useCallback(() => {
     if (midiInputRef.current) midiInputRef.current.onmidimessage = null;
@@ -61,6 +76,44 @@ export default function Home() {
     receivedPartsRef.current = 0;
     previousPartRef.current = null;
     lastVideoSyncAtRef.current = null;
+    previousMtcSampleRef.current = null;
+    rateSamplesRef.current = [];
+    transportRateRef.current = 1;
+    setTransportRate(1);
+  }, []);
+
+  const updateTransportRate = useCallback((decoded: DecodedMtc, receivedAt: number) => {
+    const seconds = mtcToSeconds(decoded);
+    const previous = previousMtcSampleRef.current;
+    previousMtcSampleRef.current = { seconds, receivedAt, direction: decoded.direction, fps: decoded.fps };
+
+    if (!previous || previous.direction !== decoded.direction || previous.fps !== decoded.fps) {
+      rateSamplesRef.current = [];
+      return;
+    }
+
+    const elapsed = (receivedAt - previous.receivedAt) / 1000;
+    if (elapsed <= 0 || elapsed > 1) {
+      rateSamplesRef.current = [];
+      return;
+    }
+
+    let timecodeDelta = seconds - previous.seconds;
+    const halfDay = 12 * 60 * 60;
+    if (decoded.direction === 'forward' && timecodeDelta < -halfDay) timecodeDelta += 24 * 60 * 60;
+    if (decoded.direction === 'reverse' && timecodeDelta > halfDay) timecodeDelta -= 24 * 60 * 60;
+    const measuredRate = Math.abs(timecodeDelta) / elapsed;
+    if (measuredRate > MAX_AUTO_PLAYBACK_RATE * 1.25) {
+      rateSamplesRef.current = [];
+      return;
+    }
+
+    const samples = [...rateSamplesRef.current, measuredRate].slice(-RATE_SAMPLE_WINDOW);
+    rateSamplesRef.current = samples;
+    const sorted = [...samples].sort((a, b) => a - b);
+    const detectedRate = clamp(sorted[Math.floor(sorted.length / 2)], 0, MAX_AUTO_PLAYBACK_RATE);
+    transportRateRef.current = detectedRate;
+    setTransportRate(detectedRate);
   }, []);
 
   const syncVideo = useCallback((decoded: DecodedMtc, force = false) => {
@@ -75,13 +128,13 @@ export default function Home() {
     const correctedTime = mtcToSeconds(decoded) + quarterFrameCompensation + offsetRef.current / 1000;
     if (correctedTime < 0) {
       video.pause();
-      video.playbackRate = 1;
+      video.playbackRate = playbackRateRef.current;
       video.currentTime = 0;
       return;
     }
     if (Number.isFinite(video.duration) && correctedTime > video.duration) {
       video.pause();
-      video.playbackRate = 1;
+      video.playbackRate = playbackRateRef.current;
       video.currentTime = video.duration;
       return;
     }
@@ -93,8 +146,18 @@ export default function Home() {
       video.currentTime = target;
       return;
     }
-    if (Math.abs(drift) > 0.09) video.currentTime = target;
-    video.playbackRate = clamp(1 + drift * 0.18, 0.97, 1.03);
+    const baseRate = transportRateRef.current;
+    if (baseRate < 0.05) {
+      video.pause();
+      if (Math.abs(drift) > 0.03) video.currentTime = target;
+      return;
+    }
+    if (Math.abs(drift) > 0.09) {
+      video.currentTime = target;
+      video.playbackRate = baseRate;
+    } else {
+      video.playbackRate = clamp(baseRate + drift * 0.18, baseRate * 0.97, baseRate * 1.03);
+    }
     if (video.paused) void video.play().catch(() => setStatusMessage('動画を一度クリックして再生を許可してください'));
   }, []);
 
@@ -108,7 +171,8 @@ export default function Home() {
     quarterFramesRef.current[part] = data[1] & 0x0f;
     receivedPartsRef.current |= 1 << part;
     previousPartRef.current = part;
-    lastPacketAtRef.current = performance.now();
+    const receivedAt = performance.now();
+    lastPacketAtRef.current = receivedAt;
     setMidiStatus('live');
     setStatusMessage('MTC受信中');
     if (receivedPartsRef.current !== 0xff || (!completesForward && !completesReverse)) return;
@@ -123,9 +187,10 @@ export default function Home() {
       dropFrame: rateIndex === 2,
       direction: completesForward ? 'forward' : 'reverse',
     };
+    updateTransportRate(decoded, receivedAt);
     setTimecode(decoded);
     syncVideo(decoded);
-  }, [syncVideo]);
+  }, [syncVideo, updateTransportRate]);
 
   const selectMidiInput = useCallback((id: string) => {
     disconnectMidi();
@@ -151,9 +216,11 @@ export default function Home() {
   useEffect(() => {
     const nav = navigator as Navigator & { requestMIDIAccess?: () => Promise<MidiAccessLike> };
     if (!nav.requestMIDIAccess) {
-      setMidiStatus('error');
-      setStatusMessage('Web MIDI非対応です。Chrome / Edgeをご利用ください');
-      return;
+      const timer = window.setTimeout(() => {
+        setMidiStatus('error');
+        setStatusMessage('Web MIDI非対応です。Chrome / Edgeをご利用ください');
+      }, 0);
+      return () => window.clearTimeout(timer);
     }
     let active = true;
     void nav.requestMIDIAccess().then((access) => {
@@ -179,6 +246,10 @@ export default function Home() {
         setMidiStatus('waiting');
         setStatusMessage('MTC信号を待っています');
         lastVideoSyncAtRef.current = null;
+        previousMtcSampleRef.current = null;
+        rateSamplesRef.current = [];
+        transportRateRef.current = 1;
+        setTransportRate(1);
         const video = videoRef.current;
         if (syncEnabledRef.current && video) { video.pause(); video.playbackRate = 1; }
       }
@@ -214,8 +285,23 @@ export default function Home() {
     lastVideoSyncAtRef.current = null;
     const video = videoRef.current;
     if (!video) return;
-    if (!next) { video.pause(); video.playbackRate = 1; }
-    else if (timecode) syncVideo(timecode, true);
+    if (!next) { video.pause(); video.playbackRate = playbackRate; }
+    else {
+      video.playbackRate = transportRateRef.current || 1;
+      if (timecode) syncVideo(timecode, true);
+    }
+  }
+
+  function toggleMute() {
+    const next = !muted;
+    setMuted(next);
+    if (videoRef.current) videoRef.current.muted = next;
+  }
+
+  function updatePlaybackRate(next: number) {
+    setPlaybackRate(next);
+    playbackRateRef.current = next;
+    if (videoRef.current && !syncEnabledRef.current) videoRef.current.playbackRate = next;
   }
 
   function updateOffset(next: number) {
@@ -238,7 +324,7 @@ export default function Home() {
         <section className="player-column" aria-label="ビデオプレーヤー">
           <div className={`video-stage ${dragging ? 'is-dragging' : ''} ${videoUrl ? 'has-video' : ''}`} onDragEnter={(event) => { event.preventDefault(); setDragging(true); }} onDragOver={(event) => event.preventDefault()} onDragLeave={() => setDragging(false)} onDrop={handleDrop}>
             {videoUrl ? (
-              <video ref={videoRef} src={videoUrl} playsInline onLoadedMetadata={(event) => setDuration(event.currentTarget.duration)} onTimeUpdate={(event) => setCurrentTime(event.currentTarget.currentTime)} onClick={(event) => { if (!syncEnabled) event.currentTarget.paused ? void event.currentTarget.play() : event.currentTarget.pause(); }} />
+              <video ref={videoRef} src={videoUrl} playsInline muted={muted} onLoadedMetadata={(event) => { setDuration(event.currentTarget.duration); setCurrentTime(0); event.currentTarget.playbackRate = syncEnabledRef.current ? 1 : playbackRate; }} onTimeUpdate={(event) => setCurrentTime(event.currentTarget.currentTime)} onClick={(event) => { if (!syncEnabled) { if (event.currentTarget.paused) void event.currentTarget.play(); else event.currentTarget.pause(); } }} />
             ) : (
               <div className="empty-state">
                 <div className="upload-icon" aria-hidden="true"><span>＋</span></div>
@@ -258,6 +344,18 @@ export default function Home() {
             <button className="transport-button" aria-label={syncEnabled ? '同期を解除' : '同期を開始'} disabled={!videoUrl} onClick={toggleSync}>{syncEnabled ? 'Ⅱ' : '▶'}</button>
             <div className="timeline" aria-hidden="true"><span style={{ width: `${progress}%` }} /></div>
             <output>{formatDuration(currentTime)} / {formatDuration(duration)}</output>
+            <div className="playback-settings">
+              <button className={`mute-button ${muted ? 'active' : ''}`} aria-label={muted ? 'ミュートを解除' : '動画をミュート'} aria-pressed={muted} disabled={!videoUrl} onClick={toggleMute} title={muted ? 'ミュートを解除' : '動画をミュート'}>
+                <span aria-hidden="true">{muted ? '×' : '♪'}</span>
+              </button>
+              <label className="rate-control" title={syncEnabled ? 'MTC同期中は再生速度を変更できません' : '再生速度'}>
+                <span className="sr-only">再生速度</span>
+                <select value={syncEnabled ? 'auto' : playbackRate} disabled={!videoUrl || syncEnabled} onChange={(event) => updatePlaybackRate(Number(event.target.value))} aria-label={syncEnabled ? `MTC自動追従 ${transportRate.toFixed(2)}倍速` : '再生速度'}>
+                  {syncEnabled && <option value="auto">AUTO {transportRate.toFixed(2)}×</option>}
+                  {PLAYBACK_RATES.map((rate) => <option key={rate} value={rate}>{rate}×</option>)}
+                </select>
+              </label>
+            </div>
             <button className="small-action" onClick={() => fileInputRef.current?.click()} title="動画を変更">↻</button>
           </div>
 
