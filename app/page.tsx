@@ -2,8 +2,8 @@
 
 import { ChangeEvent, DragEvent, useCallback, useEffect, useRef, useState } from 'react';
 
-type MidiInputLike = { id: string; name?: string; onmidimessage: ((event: { data?: Uint8Array }) => void) | null };
-type MidiAccessLike = { inputs: Map<string, MidiInputLike>; onstatechange: (() => void) | null };
+type MidiInputLike = MIDIInput;
+type MidiAccessLike = MIDIAccess;
 type DecodedMtc = { hours: number; minutes: number; seconds: number; frames: number; fps: number; dropFrame: boolean; direction: 'forward' | 'reverse' };
 
 const FRAME_RATES = [24, 25, 29.97, 30] as const;
@@ -158,7 +158,7 @@ export default function Home() {
     if (video.paused) void video.play().catch(() => setStatusMessage('動画を一度クリックして再生を許可してください'));
   }, []);
 
-  const handleMidiMessage = useCallback((event: { data?: Uint8Array }) => {
+  const handleMidiMessage = useCallback((event: MIDIMessageEvent) => {
     const data = event.data;
     if (!data || data.length < 2 || data[0] !== 0xf1) return;
     const part = (data[1] >> 4) & 0x07;
